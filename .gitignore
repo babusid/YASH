@@ -1,0 +1,5 @@
+*.txt
+tests/*
+.vscode/
+yash
+main
