@@ -4,6 +4,8 @@
 #include <fcntl.h>
 #include <sys/wait.h>
 #include <readline/readline.h>
+#include <stdbool.h>
+
 
 /**Struct Defs**/
 typedef struct _procstruct{
@@ -16,10 +18,12 @@ typedef struct _procstruct{
 
 //TODO: If time to implement infinite pipe, processes should be a linked list rather than distinct children of the job struct
 typedef struct _jobstruct {
+    struct _jobstruct* nextJob; // pointer to the next job
     ProcessStruct* p1; //first process
     ProcessStruct* p2; //second process
     int numProcesses; //how many processes we actually have
-    int pgid; 
+    bool bg; //whether or not this job is in the background
+    int pgid; //pgid of the job
 } JobStruct;
 
 /**Necessary subfunctions**/
@@ -30,11 +34,12 @@ void startProcess(ProcessStruct* proc, int procInput, int procOutput);
 
 /**Helpful Macros**/
 #define NOPIPE -1
-
+#define DEBUG 1
 
 int main(){
     char *strbuf; //buffer to hold the input string
     char** tokens; //buffer to hold the tokenized version of the input string
+    signal(SIGTTOU,SIG_IGN);
     
     while(1){
         /**Create a Job to execute**/
@@ -56,37 +61,89 @@ int main(){
            //Exec Process 1
            pid_t child1 = fork();
            if(child1==0){
-                close(pipeArr[0]);
-                startProcess(job->p1,NOPIPE,pipeArr[1]);
+                close(pipeArr[0]); //close pipe
+                setpgid(getpid(),getpid()); //setup and add to prog grp
+
+                //transfer term. control
+                tcsetpgrp(STDIN_FILENO, job->pgid);
+
+                //start process
+                startProcess(job->p1,NOPIPE,pipeArr[1]); 
            }
+           job->pgid = child1;
+
             //Exec Process 2
            pid_t child2 = fork();
            if(child2==0){
-                close(pipeArr[1]);
-                startProcess(job->p2,pipeArr[0], NOPIPE);
+                close(pipeArr[1]); //close pipe
+                setpgid(getpid(),job->pgid); //add to prog grp
+
+                //transfer term. control
+                tcsetpgrp(STDIN_FILENO, job->pgid);
+
+                //start process
+                startProcess(job->p2,pipeArr[0], NOPIPE); 
            }
 
-            //close the pipes and wait on the two processes to finish
+           //close the pipes
            close(pipeArr[0]);
            close(pipeArr[1]);
+           //in case child processes havent been scheduled yet, set their pgids
+           setpgid(child1, job->pgid); 
+           setpgid(child2, job->pgid);
+               
+           //wait on processes to finish
            int execstat1;
-           waitpid(child1,&execstat1,WUNTRACED);
            int execstat2;
-           waitpid(child2,&execstat2,WUNTRACED);
+           waitpid((-1)*(job->pgid),&execstat1,WUNTRACED); //OH: Do we need a double wait here for the processes to finish?
+           waitpid((-1)*(job->pgid),&execstat2,WUNTRACED);
+
+           #if DEBUG == 1 //DEBUG ONLY: Check if the processes have exited properly
+           int debug;
+           waitpid(child1, &debug, WNOHANG|WUNTRACED);
+           int debug2; 
+           waitpid(child2,&debug2,WNOHANG|WUNTRACED);
+           printf("%x\n",WIFEXITED(debug));
+           printf("%x\n",WIFEXITED(debug2));
+           #endif
            
-           //store the children pids and pgid
-           job->p1->pid = child1;
-           job->p2->pid = child2;
+           //transfer terminal control back to the shell
+           tcsetpgrp(STDIN_FILENO, getpgid(0));
+           
         } else {
             pid_t child1 = fork();
             if(child1==0){
+                //setup pgid
                 job->pgid = getpid();
+                setpgid(getpid(),getpid());
+
+                //transfer terminal control
+                tcsetpgrp(STDIN_FILENO, getpgid(0));
+
+                //Start the process
                 startProcess(job->p1,NOPIPE,NOPIPE);
             }
-            int execstat;
-            waitpid(child1,&execstat,WUNTRACED);
-            job->p1->pid = child1;
+
+            //setup pgid to wait on
+           job->pgid = child1;
+           setpgid(child1,job->pgid);
+           tcsetpgrp(STDIN_FILENO, job->pgid); // transfer terminal control to the job
+      
+
+           int execstat;
+           waitpid((-1)*(job->pgid),&execstat,WUNTRACED); //wait on the job
+
+           #if DEBUG == 1 //DEBUG ONLY: Check if the processes have exited properly
+           int debug;
+           waitpid(child1, &debug, WNOHANG|WUNTRACED);
+           printf("%x\n",WIFEXITED(debug));
+           #endif
+
+           //transfer terminal control back to the shell
+           tcsetpgrp(STDIN_FILENO, getpgid(0));
+      
         }
+
 
         //QUESTION FOR TA/PROF: IS THE FOLLOWING LINE OKAY?
         //TODO: add wait on job to finish in order to prevent weird printing errors
@@ -216,31 +273,15 @@ void startProcess(ProcessStruct* proc, int procInput, int procOutput){
         int errorfile = open(proc->ERROR,O_WRONLY|O_APPEND|O_CREAT);
         dup2(errorfile,STDOUT_FILENO);
     }
-
-    //TODO: wait on go-ahead signal from executor process
-
     //execute the process defined in cmd
     execvp(proc->CMD[0],proc->CMD);
 }
 
-/**
- * @brief Signal handler intended for use with SIGUSR1. This callback 
- * @param signum the signal  
- */
-void startProcessSignalHandler(int signum){
-
-}
 
 /**
  * TODO:
- * Get pipe redirection working
- * Have parent shell process wait properly on job to finish
  * Watch signals lecture to understand more
- * Command does not exist error needs to be made
- */
-
-/**
- * Questions:
- * WC not working with pipes but other commands are
- * garbage commands that have pipe input and file output, put the input in the file 
+ * Add Support for backgrounding a job
+ * Work on terminal ctrl
+ * Organize code more once stuff is done
  */
