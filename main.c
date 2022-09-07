@@ -22,7 +22,8 @@ typedef struct _jobstruct {
     ProcessStruct* p1; //first process
     ProcessStruct* p2; //second process
     int numProcesses; //how many processes we actually have
-    bool bg; //whether or not this job is in the background
+    int bg; //whether or not this job is in the background
+    int status; //status of this job
     int pgid; //pgid of the job
 } JobStruct;
 
@@ -33,13 +34,27 @@ JobStruct* createJob(char** tokens);
 void startProcess(ProcessStruct* proc, int procInput, int procOutput);
 
 /**Helpful Macros**/
-#define NOPIPE -1
-#define DEBUG 1
+//Process creation macros
+#define NOPIPE -1 //startProcess argument to indicate that there is no pipe in a direction
+
+//Job control macros
+#define FOREGROUND 0 //foreground job
+#define BACKGROUND 1 //background job
+#define RUNNING 0 //status macros
+#define STOPPED 1
+#define TERMINATED 2
+
 
 int main(){
     char *strbuf; //buffer to hold the input string
     char** tokens; //buffer to hold the tokenized version of the input string
-    signal(SIGTTOU,SIG_IGN);
+    JobStruct* fjob; //pointer to the current foreground job
+    JobStruct* bjobs; //pointer to the stack of background jobs
+
+    //ignore certain signals for the main shell process
+    signal(SIGTTOU, SIG_IGN);
+    signal(SIGTSTP, SIG_IGN);
+    // signal(SIGINT,  SIG_IGN); //UNCOMMENT once Ctrl D works
     
     while(1){
         /**Create a Job to execute**/
@@ -52,105 +67,133 @@ int main(){
             continue;
         }
         JobStruct* job = createJob(tokens); 
-
         /**Execute the Job that was created**/
         int pipeArr[2]; //create the pipe if needed, condition on job numjobs field
         if(job->numProcesses == 2){
-           pipe(pipeArr); //NOTE: the right side is the write side, the left side is the read side
+            pipe(pipeArr); //NOTE: the right side is the write side, the left side is the read side
 
-           //Exec Process 1
-           pid_t child1 = fork();
-           if(child1==0){
+            //Exec Process 1
+            pid_t child1 = fork();
+            if(child1==0){
+                //unignore signals
+                signal(SIGTSTP, SIG_DFL);
+                signal(SIGINT,  SIG_DFL);
                 close(pipeArr[0]); //close pipe
                 setpgid(getpid(),getpid()); //setup and add to prog grp
 
-                //transfer term. control
-                tcsetpgrp(STDIN_FILENO, job->pgid);
-
+                //transfer terminal control if job is a foreground job
+                if(job->bg == FOREGROUND){
+                    tcsetpgrp(STDIN_FILENO, job->pgid);
+                } 
                 //start process
+                job->status = RUNNING;
                 startProcess(job->p1,NOPIPE,pipeArr[1]); 
-           }
-           job->pgid = child1;
+            }
+            job->pgid = child1;
 
-            //Exec Process 2
-           pid_t child2 = fork();
-           if(child2==0){
+                //Exec Process 2
+            pid_t child2 = fork();
+            if(child2==0){
+                //unignore stop and int signals
+                signal(SIGTSTP, SIG_DFL);
+                signal(SIGINT,  SIG_DFL);
                 close(pipeArr[1]); //close pipe
                 setpgid(getpid(),job->pgid); //add to prog grp
 
-                //transfer term. control
-                tcsetpgrp(STDIN_FILENO, job->pgid);
-
+                //transfer terminal control if job is a foreground job
+                if(job->bg == FOREGROUND){
+                    tcsetpgrp(STDIN_FILENO, job->pgid);
+                } 
                 //start process
+                job->status = RUNNING;
                 startProcess(job->p2,pipeArr[0], NOPIPE); 
-           }
+            }
+            job->status = RUNNING; //set job as running
 
-           //close the pipes
-           close(pipeArr[0]);
-           close(pipeArr[1]);
-           //in case child processes havent been scheduled yet, set their pgids
-           setpgid(child1, job->pgid); 
-           setpgid(child2, job->pgid);
-               
-           //wait on processes to finish
-           int execstat1;
-           int execstat2;
-           waitpid((-1)*(job->pgid),&execstat1,WUNTRACED); //OH: Do we need a double wait here for the processes to finish?
-           waitpid((-1)*(job->pgid),&execstat2,WUNTRACED);
+            //close the pipes
+            close(pipeArr[0]);
+            close(pipeArr[1]);
+            //in case child processes havent been scheduled yet, set their pgids
+            setpgid(child1, job->pgid); 
+            setpgid(child2, job->pgid);
+                
+            //wait on processes to finish
+            int execstat1;
+            int execstat2;
+            if(job->bg == FOREGROUND){
+                tcsetpgrp(STDIN_FILENO, job->pgid); // transfer terminal control to the job because its foreground
+                waitpid(child1,&execstat1,WUNTRACED);  //wait on the two jobs
+                waitpid(child2,&execstat2,WUNTRACED);
+            } else {
+                waitpid(child1,&execstat1,WUNTRACED|WNOHANG); //non-blocking wait on the jobs
+                waitpid(child2, &execstat2,WUNTRACED|WNOHANG);
+            }
 
-           #if DEBUG == 1 //DEBUG ONLY: Check if the processes have exited properly
-           int debug;
-           waitpid(child1, &debug, WNOHANG|WUNTRACED);
-           int debug2; 
-           waitpid(child2,&debug2,WNOHANG|WUNTRACED);
-           printf("%x\n",WIFEXITED(debug));
-           printf("%x\n",WIFEXITED(debug2));
-           #endif
-           
-           //transfer terminal control back to the shell
-           tcsetpgrp(STDIN_FILENO, getpgid(0));
-           
+
+            #if DEBUG == 1 //DEBUG ONLY: Check if the processes have exited properly
+            int debug;
+            waitpid(child1, &debug, WNOHANG|WUNTRACED);
+            int debug2; 
+            waitpid(child2,&debug2,WNOHANG|WUNTRACED);
+            printf("EXIT STATUS: %x\n",WIFEXITED(debug));
+            printf("EXIT STATUS: %x\n",WIFEXITED(debug2));
+            #endif
+            //transfer terminal control back to the shell
+            if(job->bg == FOREGROUND){
+                tcsetpgrp(STDIN_FILENO, getpgid(0));
+            }
+
         } else {
             pid_t child1 = fork();
             if(child1==0){
+                //unignore stop and int signals
+                signal(SIGTSTP, SIG_DFL);
+                signal(SIGINT,  SIG_DFL);
                 //setup pgid
                 job->pgid = getpid();
                 setpgid(getpid(),getpid());
 
-                //transfer terminal control
-                tcsetpgrp(STDIN_FILENO, getpgid(0));
-
+                //transfer terminal control if job is a foreground job
+                if(job->bg == FOREGROUND){
+                    tcsetpgrp(STDIN_FILENO, getpgid(0));
+                } 
                 //Start the process
+                job->status = RUNNING;
                 startProcess(job->p1,NOPIPE,NOPIPE);
             }
 
             //setup pgid to wait on
            job->pgid = child1;
            setpgid(child1,job->pgid);
-           tcsetpgrp(STDIN_FILENO, job->pgid); // transfer terminal control to the job
-      
-
+           job->status = RUNNING; //set job as running
            int execstat;
-           waitpid((-1)*(job->pgid),&execstat,WUNTRACED); //wait on the job
+           if(job->bg == FOREGROUND){
+                tcsetpgrp(STDIN_FILENO, job->pgid); // transfer terminal control to the job
+                waitpid(child1,&execstat,WUNTRACED); //wait on the job
+           } else {
+                waitpid(child1,&execstat,WUNTRACED|WNOHANG); //non-blocking wait on the job
+           }
+
 
            #if DEBUG == 1 //DEBUG ONLY: Check if the processes have exited properly
            int debug;
            waitpid(child1, &debug, WNOHANG|WUNTRACED);
-           printf("%x\n",WIFEXITED(debug));
+           printf("EXIT STATUS: %x\n",WIFEXITED(debug));
            #endif
 
            //transfer terminal control back to the shell
-           tcsetpgrp(STDIN_FILENO, getpgid(0));
+           if(job->bg == FOREGROUND){
+                tcsetpgrp(STDIN_FILENO, getpgid(0));
+           }
       
         }
 
-
-        //QUESTION FOR TA/PROF: IS THE FOLLOWING LINE OKAY?
-        //TODO: add wait on job to finish in order to prevent weird printing errors
-        //TODO: cleanup should wait on job finished
-        free(strbuf);
+        //TODO: These cleanups need to get moved to wherever the jobs list gets pruned
         free(job->p1);
         free(job->p2);
+        free(job);
+
+        free(strbuf);
         free(tokens);
     }
 
@@ -185,16 +228,32 @@ JobStruct* createJob(char** tokens){
     JobStruct *job = (JobStruct*) malloc(sizeof(JobStruct));
     //parse the tokens for pipe here to create the job struct
     int secondCmd = -1; //index at which second cmd starts
-    int i;
+    int i; //index of where we are in the string
     job->numProcesses = 1; //every job has at least one process
+    bool pipeParseFinished = false; //whether or not we've finished parsing for pipes
     for(i = 0; tokens[i]!=0x0;i++){ //loop until null terminator
-        if(strcmp(tokens[i],"|")==0 && tokens[i+1]!=NULL){ //if we find a pipe with something after it, replace it with a null and mark second as starting after it
+        if(strcmp(tokens[i],"|")==0 && tokens[i+1]!=NULL && !pipeParseFinished){ //if we find a pipe with something after it, replace it with a null and mark second as starting after it
             tokens[i] = NULL;
             secondCmd = i+1;
             job->numProcesses++;
-            break; //TODO: If we have time to implement infinite pipe, get rid of this break
+            pipeParseFinished = true; //TODO: If we have time for infinite pipes, this should get removed and replaced
         }
     }
+
+    //whether or not this job should start in the background
+    if(strcmp(tokens[i-1],"&") == 0){
+        #if DEBUG == 1 
+        printf("background process\n");
+        #endif
+        tokens[i-1] = NULL;
+        job->bg = BACKGROUND;
+    } else {
+        #if DEBUG == 1 
+        printf("foreground process\n");
+        #endif
+        job->bg = FOREGROUND;
+    }
+
     if(secondCmd == -1){
         secondCmd = i;
     }
@@ -278,10 +337,56 @@ void startProcess(ProcessStruct* proc, int procInput, int procOutput){
 }
 
 
+
+
+
+
 /**
  * TODO:
- * Watch signals lecture to understand more
- * Add Support for backgrounding a job
- * Work on terminal ctrl
- * Organize code more once stuff is done
+ * Add CTRL+D to quit the shell
+ * Add linked list of jobs in order to implement a list of them
+ * Get CTRL D working
+ */
+
+/**
+ * JOBSNOTES:
+ * Jobs commands prints exited jobs as "Done", and then afterwards prunes finished jobs
+ * job needs a "visibility" or "position" field that indicates fg/bg. 
+ * job needs a "status field" that indicates running/stopped/terminated
+ * 
+ * Start a foreground job (no ampersand at end of cmd) -> job should go into fg job node -> job should be marked as running and fg.
+ * Start a background job (ampersand at end of cmd) -> job should go at top of bg job stack -> job should be marked as running and bg.
+ * Stop foreground job (ctrl Z) -> job should go at the top of bg job stack -> job should be marked as stopped and bg.
+ * bg cmd -> iterate over bg job stack until stopped job found -> Send SIGCONT using kill syscall -> print process in jobs format to stdout -> run in background. Job should be marked running. Don't wait on job
+ * fg cmd -> bring most recent stopped OR background process to foreground -> print process in jobs format to stdout -> run in foreground, job should be marked running/fg, and put into the fg job ptr. Wait on job also.
+ * 
+ * STRATEGY:
+ * At end of shell proc while loop, we need to iterate over the jobs (bg stack and fg job) to update their statuses. 
+ * This can be done with a for loop, and waitpid (combined with macros). This for loop should go over the entire bg job stack and update their running statuses
+ * Note: waitpid won't update status int, if the process has not changed status. 
+ * Note: Job status is conditional upon both processes in a piped job.
+ * 'jobs' command should print all the jobs in the bg list in the standard format. This can be done by iterating over the list of processes and printing them out. It should also prune the bg jobs list after printing
+ * When a job finishes in the background, it should be printed the next time the while loop comes around. This can be done by running similar logic to the jobs command at the top of the while loop but it should only print finished jobs. It should also prune the jobs list after printing
+ * 
+ * FUNCTIONS:
+ * pruneJobs() : trim the exited jobs from the bg jobs list : applies to bg jobs only
+ * 
+ * printFinishedJobs() : print the finished jobs from the bg jobs list : applies to bg jobs only
+ * 
+ * updateJobStatus() : iterate over the given linked list represented by a head ptr, and use the 
+ * waitpid to update the job statuses of each. Make sure to initialize status int to -1, and 
+ * if it doesn't change, don't update the process status : applies to bg jobs only (i think)
+ * 
+ * fg_handler() : foreground a job by switching the top bg job into the foreground job ptr. It should then also wait on this job to finish, and transfer terminal control back to it. 
+ * It should then be waited on in the same way that a normal fg job is
+ * 
+ * bg_handler() : start running the most recently stopped job in the background. : applies to bg jobs only
+ * 
+ * NOTE: We need to have a blocking wait on the foreground job provided that the foreground job is not null. 
+ * If it is null, we either have no jobs, or everything is in bg, meaning we can take a new input
+ * 
+ * NOTE: When waiting on an fg job, if waitpid exits, and shows the job was stopped, that job needs to move to the top of th bg job stack. 
+ * 
+ * NOTE: Need to restructure the current execution thread such that we skip the job creation and execution stage and go straight to waiting on the fg job if fg/bg/jobs is run
+ * 
  */
