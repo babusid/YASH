@@ -40,9 +40,10 @@ void startProcess(ProcessStruct* proc, int procInput, int procOutput);
 JobStruct* stopHandler(JobStruct* fgJob, JobStruct* bgJobs);
 void updateJobStatus(JobStruct* jobslist);
 JobStruct* pruneJobs(JobStruct* bgStack);
+void waitOnJob(JobStruct* job, JobStruct** bgStack);
 
 /**SHELL COMMAND FUNCTIONS**/
-JobStruct* fg_handler(JobStruct* fgJob, JobStruct* bgJobs);
+void fg_handler(JobStruct** bgStack);
 void bg_handler(JobStruct* bgStack);
 void jobs_handler(JobStruct* bgStack);
 
@@ -56,6 +57,9 @@ void jobs_handler(JobStruct* bgStack);
 #define RUNNING 0 //status macros
 #define STOPPED 1
 #define TERMINATED 2
+
+/**DEBUG**/
+void debugJobs(JobStruct* bgJobs);
 
 /**PROGRAM STARTS HERE**/
 
@@ -87,37 +91,20 @@ int main(){
             free(tokens);
             continue;
         } else if (strcmp(tokens[0],"fg") == 0){ //fg command is a shell cmd w no args. It puts the most recently stopped/backgrounded process back into foreground run status
+            fg_handler(&bgJobs);
             continue;
         } else if (strcmp(tokens[0],"bg") == 0){ //bg command is a shell cmd w no args
             continue;
         } else if (strcmp(tokens[0],"jobs") == 0){ //jobs command is a shell cmd w no args
             //TODO: add the remaining logic for jobs
-            bgJobs = pruneJobs(bgJobs);
-            
-            //Debug info bgJobs
             #if DEBUG == 1
-            int cnt = 0;
-            int cntTerm = 0;
-            int cntStp = 0;
-            int cntRun = 0;
-            for(JobStruct* head = bgJobs;head!=NULL;head=head->nextJob){
-                cnt++;
-                switch(head->status){
-                    case RUNNING:
-                        cntRun++;
-                        break;
-                    case TERMINATED:
-                        cntTerm++;
-                        break;
-                    case STOPPED:
-                        cntStp++;
-                        break;
-                }
-            }
-            printf("Count of bg jobs:               %i\n",cnt);
-            printf("Count of running bg jobs:       %i\n",cntRun);
-            printf("Count of terminated bg jobs:    %i\n",cntTerm);
-            printf("Count of stopped bg jobs:       %i\n",cntStp);
+            printf("PRE-PRUNE\n");
+            debugJobs(bgJobs);
+            #endif
+            bgJobs = pruneJobs(bgJobs);
+            #if DEBUG == 1
+            printf("POST-PRUNE\n");
+            debugJobs(bgJobs);
             #endif
             continue;
         }
@@ -180,31 +167,8 @@ int main(){
             job->p1->status = RUNNING;
             job->p2->status = RUNNING;
 
-                
-            //wait on processes to finish conditional upon visibility
-            int execstat1;
-            int execstat2;
-            if(job->visibility == FOREGROUND){
-                tcsetpgrp(STDIN_FILENO, job->pgid); // transfer terminal control to the job because its foreground
-                fgJob = job; //set as the foreground job
-                waitpid(child1,&execstat1,WUNTRACED);  //wait on the two jobs
-                waitpid(child2,&execstat2,WUNTRACED);
-                tcsetpgrp(STDIN_FILENO, getpgid(0)); //transfer terminal control back to the shell
-
-                //if the process was stopped by ctrl+z, move the job to the background in the stopped state
-                if(!(WIFEXITED(execstat2) | WIFSIGNALED(execstat2))){
-                    bgJobs = stopHandler(fgJob,bgJobs);
-                    fgJob = NULL;
-                }else{
-                    free(fgJob->p1);
-                    free(fgJob->p2);
-                    free(fgJob);
-                };
-            } else {
-                job->nextJob = bgJobs; //add job to the bg stack
-                bgJobs = job;
-            }
-        
+            //Job foregrounding/backgrounding and wait sequence
+            waitOnJob(job,&bgJobs);
         /**Single Process Job**/
         } else {
             pid_t child1 = fork();
@@ -216,7 +180,7 @@ int main(){
                 //setup pgid
                 setpgid(0,getpid());
 
-                //transfer terminal control if job is a foreground job
+                //transfer terminal control if job is a foreground job, this is here for race protection against parent thread
                 if(job->visibility == FOREGROUND){
                     tcsetpgrp(STDIN_FILENO, getpgid(0));
                 } 
@@ -235,27 +199,8 @@ int main(){
             job->status = RUNNING; 
             job->p1->status = RUNNING;
             
-            //waits
-            int execstat;
-            if(job->visibility == FOREGROUND){
-                    tcsetpgrp(STDIN_FILENO, job->pgid); // transfer terminal control to the job
-                    fgJob = job;//add job to the fg node
-                    waitpid(child1,&execstat,WUNTRACED); //wait on the job
-                    tcsetpgrp(STDIN_FILENO, getpgid(0)); //transfer terminal control back to the shell
-                    
-                    //if the process was stopped by ctrl+z, move the job to the background in the stopped state
-                    if(!(WIFEXITED(execstat) || WIFSIGNALED(execstat))){
-                        bgJobs = stopHandler(fgJob,bgJobs);
-                        fgJob = NULL;
-                    }else{
-                        free(fgJob->p1);
-                        free(fgJob->p2);
-                        free(fgJob);
-                    };
-            } else {
-                    job->nextJob = bgJobs; //add job to the bg stack
-                    bgJobs = job;
-            }
+            //Job foregrounding/backgrounding and wait sequence
+            waitOnJob(job, &bgJobs);
         }
 
         free(strbuf);
@@ -410,38 +355,46 @@ void startProcess(ProcessStruct* proc, int procInput, int procOutput){
  * TODO: this function needs to be implemented and tested
  * @param job 
  */
-void waitOnJob(JobStruct* job, JobStruct** fgJob, JobStruct** bgStack){
+void waitOnJob(JobStruct* job, JobStruct** bgStack){
     int execstat1;
     int execstat2;
     if(job->visibility == FOREGROUND){
-        //blocking wait, term transfer, stop signal handling, cleanup
-        tcsetpgrp(STDIN_FILENO, job->pgid); //transfer terminal control to the job
-        *(fgJob) = job; //add job to the fgJob ptr
-        waitpid(job->p1->pid, &execstat1, WUNTRACED); //wait on the job
-        if(job->numProcesses == 2){
-            waitpid(job->p2->pid, &execstat2, WUNTRACED); //wait on the second job
-        }
-        tcsetpgrp(STDIN_FILENO, getpgid(0)); //transfer control back to shell
-
-        //stop signal handling
-        //TODO: Cleanup?
-        if((job->numProcesses == 1) && (!(WIFEXITED(execstat1) || WIFSIGNALED(execstat1)))){ //stopped 1 process
-            *(bgStack) = stopHandler(*(fgJob),*(bgStack));
-            *(fgJob) = NULL;
-        } else if ((job->numProcesses == 2) && (!(WIFEXITED(execstat2) || WIFSIGNALED(execstat2)))) { //stopped two process
-            *(bgStack) = stopHandler(*(fgJob),*(bgStack));
-            *(fgJob) = NULL;
+        if(job->numProcesses == 1){
+            //foreground wait and finish routine
+            tcsetpgrp(STDIN_FILENO, job->pgid); // transfer terminal control to the job
+            waitpid(job->p1->pid,&execstat1,WUNTRACED); //wait on the job
+            tcsetpgrp(STDIN_FILENO, getpgid(0)); //transfer terminal control back to the shell
+            //if the process was stopped by ctrl+z, move the job to the background in the stopped state
+            if(!(WIFEXITED(execstat1) || WIFSIGNALED(execstat1))){
+                *bgStack = stopHandler(job,*bgStack);
+            }else{
+                free(job->p1);
+                free(job->p2);
+                free(job);
+            };
         } else {
-            free((*fgJob)->p1);
-            free((*fgJob)->p2);
-            free((*fgJob));
+            tcsetpgrp(STDIN_FILENO, job->pgid); // transfer terminal control to the job because its foreground
+            waitpid(job->p1->pid,&execstat1,WUNTRACED);  //wait on the two jobs
+            waitpid(job->p2->pid,&execstat2,WUNTRACED);
+            tcsetpgrp(STDIN_FILENO, getpgid(0)); //transfer terminal control back to the shell
+
+            //if the process was stopped by ctrl+z, move the job to the background in the stopped state
+            if(
+                (!(WIFEXITED(execstat2) || WIFSIGNALED(execstat2))) //if the second job didn't normally exit or got signal 
+                ||
+                (!(WIFEXITED(execstat1) || WIFSIGNALED(execstat1))) //if the first job didn't normally exit or got signal
+            ){
+                *bgStack = stopHandler(job,*bgStack);
+            }else{
+                free(job->p1);
+                free(job);
+            };
         }
     } else {
-        //no wait, add to bg stack
-        job->nextJob = *(bgStack);
-        *(bgStack) = job;
+        //background add to bgstack
+        job->nextJob = *bgStack; //add job to the bg stack
+        *bgStack = job;
     }
-    return;
 }
 
 /**JOB CONTROL FUNCTIONS**/
@@ -474,7 +427,7 @@ void updateJobStatus(JobStruct* jobslist){
             waitpid(jobslist->p1->pid,&execstatus1,WNOHANG|WUNTRACED|WCONTINUED); // get status of the process into execstatus1
             waitpid(jobslist->p2->pid,&execstatus2,WNOHANG|WUNTRACED|WCONTINUED); // get status of the process into execstatus2
 
-            if(execstatus1 != -1){
+            if(execstatus1 != -2){
                 if(WIFEXITED(execstatus1) | WIFSIGNALED(execstatus1)){ //the job was terminated either by exit call or by signal
                     jobslist->p1->status = TERMINATED;
                 } else if (WIFSTOPPED(execstatus1)){ //the job was stopped by a signal
@@ -484,7 +437,7 @@ void updateJobStatus(JobStruct* jobslist){
                 }   
             }
             
-            if(execstatus2 != -1){
+            if(execstatus2 != -2){
                 if(WIFEXITED(execstatus2) | WIFSIGNALED(execstatus2)){ //the job was terminated either by exit call or by signal
                     jobslist->p2->status = TERMINATED;
                 } else if (WIFSTOPPED(execstatus2)){ //the job was stopped by a signal
@@ -566,13 +519,38 @@ JobStruct* pruneJobs(JobStruct* bgStack){
  * 
  * @param bgStack 
  */
-JobStruct* fg_handler(JobStruct* fg, JobStruct* bgStack){
-    for(JobStruct* trav = bgStack; trav!=NULL;trav = trav->nextJob){
-        if(trav->status == STOPPED){
-
+void fg_handler(JobStruct** bgStack){
+    if(*bgStack == NULL){
+        #if DEBUG == 1
+        printf("no background jobs\n");
+        return;
+        #endif
+    }
+    JobStruct* job = NULL;
+    JobStruct* prevJob = NULL;
+    for(JobStruct* nodeptr = *bgStack; nodeptr != NULL; prevJob = nodeptr, nodeptr = nodeptr->nextJob){
+        //iterate over the LL
+        if(nodeptr->status == STOPPED){
+            nodeptr->status = RUNNING;
+            nodeptr->visibility = FOREGROUND;
+            if(prevJob != NULL){
+                prevJob->nextJob = nodeptr->nextJob; //remove the node from the bg stack
+            } else {
+                //nodeptr is pointing to a stopped headptr
+                *bgStack = NULL;
+            }
+            
+            job = nodeptr;
+            break;
         }
     }
-    return (JobStruct*)NULL;
+    if(job != NULL){
+        kill(job->p1->pid, SIGCONT);
+        if(job->numProcesses == 2){
+            kill(job->p2->pid,SIGCONT);
+        }
+        waitOnJob(job, bgStack);
+    }
 }
 
 /**
@@ -593,6 +571,31 @@ void jobs_handler(JobStruct* bgStack){
     return;
 }
 
+/**Debug utilities**/
+void debugJobs(JobStruct* bgJobs){
+    int cnt = 0;
+    int cntTerm = 0;
+    int cntStp = 0;
+    int cntRun = 0;
+    for(JobStruct* head = bgJobs;head!=NULL;head=head->nextJob){
+        cnt++;
+        switch(head->status){
+            case RUNNING:
+                cntRun++;
+                break;
+            case TERMINATED:
+                cntTerm++;
+                break;
+            case STOPPED:
+                cntStp++;
+                break;
+        }
+    }
+    printf("Count of bg jobs:               %i\n",cnt);
+    printf("Count of running bg jobs:       %i\n",cntRun);
+    printf("Count of terminated bg jobs:    %i\n",cntTerm);
+    printf("Count of stopped bg jobs:       %i\n",cntStp);
+};
 
 
 /**
@@ -601,8 +604,10 @@ void jobs_handler(JobStruct* bgStack){
  * --> MAKE A WAITONJOB function and replace the repetitive logic
  */
 
-/**
- * NOTE: Need to clean up main exec function after tagging a working commit
- * NOTE: This includes implementing waitonjob function
- * NOTE: Job list pruning should only happen after jobs function is run
- */
+/*
+TODO: Fix job pruning
+TODO: Get fg working
+TODO: Get bg working
+TODO: Get jobs working
+TODO: Error handling
+*/
