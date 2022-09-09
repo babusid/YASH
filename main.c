@@ -466,6 +466,9 @@ void updateJobStatus(JobStruct* jobslist){
                 jobslist->status = TERMINATED;
             }
         }
+        if(jobslist->status == TERMINATED){
+            printJob(jobslist,0,"-");
+        }
     }
     return;
 }
@@ -643,8 +646,9 @@ void jobs_handler(JobStruct* bgStack){
  */
 void printJob(JobStruct* job, int jobNum, char* jobInd){
     char status[20];
-    if(job->status == RUNNING){ memcpy(status,"Running",sizeof("Running"));}
-    if(job->status == STOPPED){ memcpy(status,"Stopped",sizeof("Stopped"));}
+    if(job->status == RUNNING)      { memcpy(status,"Running",sizeof("Running"));}
+    if(job->status == STOPPED)      { memcpy(status,"Stopped",sizeof("Stopped"));}
+    if(job->status == TERMINATED)   { memcpy(status,   "Done",   sizeof("Done"));}
     printf("[%x] %s %s      %s",jobNum,jobInd,status, job->jobcmd);
     printf("\n");
 }
@@ -683,12 +687,4 @@ TODO: Jobnumber feature addition
 TODO: Job Done print asynchronously -> put it in updateJobs
 TODO: Error handling - pipe improperly closing, file open issues, error output redirection
 TODO: Delete files that get created if invalid cmd w redirection comes in
-
-
-BUGS:
-- WaitonJobs is freeing the jobs if they terminate. This is called within UpdateJobs. 
-  This means that when the jobs command is run, all of the terminated jobs have already been freed. 
-  This should only happen after they've been printed to console or jobs has been called.
-- Add pretty-printing for terminated bg jobs 
-- Restarting jobs is causing other stopped jobs to get lost
 */
