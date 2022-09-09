@@ -20,12 +20,14 @@ typedef struct _procstruct{
 
 //TODO: If time to implement infinite pipe, processes should be a linked list rather than distinct children of the job struct
 typedef struct _jobstruct {
+    char* jobcmd; //complete input command
+    int numtokens; //number of tokens in the input command
     struct _jobstruct* nextJob; // pointer to the next job
     ProcessStruct* p1; //first process
     ProcessStruct* p2; //second process
     int numProcesses; //how many processes we actually have
     int visibility; //whether or not this job is in the background
-    int status;
+    int status; //status of this job
     int pgid; //pgid of the job
 } JobStruct;
 
@@ -33,7 +35,7 @@ typedef struct _jobstruct {
 /**JOB CREATION FUNCTIONS**/
 char** parse_input(char *input, const char* delim); 
 ProcessStruct* createProcess(char** tokens);
-JobStruct* createJob(char** tokens);
+JobStruct* createJob(char** tokens, char* inputCmd);
 void startProcess(ProcessStruct* proc, int procInput, int procOutput);
 
 /**JOB CONTROL FUNCTIONS**/
@@ -64,7 +66,8 @@ void debugJobs(JobStruct* bgJobs);
 /**PROGRAM STARTS HERE**/
 
 int main(){
-    char *strbuf; //buffer to hold the input string
+    char* strbuf; //buffer to hold the input string
+    char* strbufcpy; //buffer to hold a copy of the input string 
     char** tokens; //buffer to hold the tokenized version of the input string
     JobStruct* fgJob = NULL; //pointer to the current foreground job
     JobStruct* bgJobs = NULL; //pointer to the stack of background jobs
@@ -76,12 +79,14 @@ int main(){
     
     while(1){
         /**Create a Job to execute**/
-        //read in input
+        //read in input, create one copy to store in the jobstruct, and one to tokenize
         strbuf = readline("# ");
         if(!strbuf){
             printf("\n");
             exit(0);
         }
+        strbufcpy = (char*) malloc(strlen(strbuf)*sizeof(char));
+        strcpy(strbufcpy,strbuf);
 
         //Update the bg jobs stack
         updateJobStatus(bgJobs);
@@ -104,6 +109,7 @@ int main(){
             debugJobs(bgJobs);
             #endif
             bgJobs = pruneJobs(bgJobs);
+            jobs_handler(bgJobs);
             #if DEBUG == 1
             printf("POST-PRUNE\n");
             debugJobs(bgJobs);
@@ -111,7 +117,7 @@ int main(){
             continue;
         }
 
-        JobStruct* job = createJob(tokens);
+        JobStruct* job = createJob(tokens,strbufcpy);
 
         /**Execute the Job that was created**/
         int pipeArr[2]; //array to hold pipe
@@ -204,9 +210,7 @@ int main(){
             //Job foregrounding/backgrounding and wait sequence
             waitOnJob(job, &bgJobs);
         }
-
         free(strbuf);
-        free(tokens);
     }
 
 }
@@ -237,9 +241,10 @@ char **parse_input(char *input, const char* delim){
  * @param tokens 
  * @return JobStruct* 
  */
-JobStruct* createJob(char** tokens){
+JobStruct* createJob(char** tokens, char* jobcmd){
     JobStruct *job = (JobStruct*) malloc(sizeof(JobStruct));
     job->nextJob = NULL;
+    job->jobcmd = jobcmd;
     //parse the tokens for pipe here to create the job struct
     int secondCmd = -1; //index at which second cmd starts
     int i; //index of where we are in the string
@@ -371,7 +376,7 @@ void waitOnJob(JobStruct* job, JobStruct** bgStack){
                 *bgStack = stopHandler(job,*bgStack);
             }else{
                 free(job->p1);
-                free(job->p2);
+                free(job->jobcmd);
                 free(job);
             };
         } else {
@@ -389,6 +394,8 @@ void waitOnJob(JobStruct* job, JobStruct** bgStack){
                 *bgStack = stopHandler(job,*bgStack);
             }else{
                 free(job->p1);
+                free(job->p2);
+                free(job->jobcmd);
                 free(job);
             };
         }
@@ -504,6 +511,7 @@ JobStruct* pruneJobs(JobStruct* bgStack){
         if(trav->status == TERMINATED){
             slow->nextJob = trav->nextJob;
             free(trav->p1);
+            free(trav->jobcmd);
             if(trav->numProcesses == 2){
                 free(trav->p2);
             }
@@ -617,10 +625,15 @@ void bg_handler(JobStruct** bgStack){
  * @param bgStack 
  */
 void jobs_handler(JobStruct* bgStack){
-
-
-
-    return;
+    char* jobInd = "+"; //flag to mark the job that fg would pick
+    int jobNum = 1;
+    for(JobStruct* trav = bgStack; trav!=NULL;trav = trav->nextJob, ++jobNum, jobInd = "-"){
+        char status[20];
+        if(trav->status == RUNNING){ memcpy(status,"Running",sizeof("Running"));}
+        if(trav->status == STOPPED){ memcpy(status,"Stopped",sizeof("Stopped"));}
+        printf("[%x] %s %s      %s",jobNum,jobInd,status, trav->jobcmd);
+        printf("\n");
+    }
 }
 
 /**Debug utilities**/
@@ -650,17 +663,20 @@ void debugJobs(JobStruct* bgJobs){
 };
 
 
-/**
- * NOTES: FG handler function can probably copy a lot of the waiting code from the current main exec function 
- * It needs to find a stopped job and sent SIGCONT to all the processes that were stopped in the job. It then needs to wait on the new fg job in the same way the new job exec stuff does.
- * --> MAKE A WAITONJOB function and replace the repetitive logic
-*/
 
 /*
-TODO: Fix fg - needs to be able to pull running background jobs into foreground.
-TODO: Get bg working
-TODO: Get jobs working
-TODO: Job Done print 
+TODO: Get jobs working - sort of? Need to refine and finish this off
+TODO: Jobnumber feature addition
+TODO: Job Done print asynchronously -> put it in updateJobs
 TODO: Error handling - pipe improperly closing, file open issues, error output redirection
 TODO: Delete files that get created if invalid cmd w redirection comes in
+
+
+BUGS:
+- WaitonJobs is freeing the jobs if they terminate. This is called within UpdateJobs. 
+  This means that when the jobs command is run, all of the terminated jobs have already been freed. 
+  This should only happen after they've been printed to console or jobs has been called.
+- Add pretty-printing for terminated bg jobs 
+- Add storage of job cmd in the job struct
+
 */
