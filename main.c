@@ -43,6 +43,7 @@ JobStruct* stopHandler(JobStruct* fgJob, JobStruct* bgJobs);
 void updateJobStatus(JobStruct* jobslist);
 JobStruct* pruneJobs(JobStruct* bgStack);
 void waitOnJob(JobStruct* job, JobStruct** bgStack);
+void printJob(JobStruct* job, int jobNum, char* jobInd);
 
 /**SHELL COMMAND FUNCTIONS**/
 void fg_handler(JobStruct** bgStack);
@@ -211,6 +212,7 @@ int main(){
             waitOnJob(job, &bgJobs);
         }
         free(strbuf);
+        strbufcpy = NULL;
     }
 
 }
@@ -547,7 +549,7 @@ void fg_handler(JobStruct** bgStack){
                 prevJob->nextJob = nodeptr->nextJob; //remove the node from the bg stack
             } else {
                 //nodeptr is pointing to headptr
-                *bgStack = NULL;
+                *bgStack = nodeptr->nextJob;
             }
             
             job = nodeptr;
@@ -594,7 +596,7 @@ void bg_handler(JobStruct** bgStack){
                 prevJob->nextJob = nodeptr->nextJob; //remove the node from the bg stack
             } else {
                 //nodeptr is pointing to a stopped headptr
-                *bgStack = NULL;
+                *bgStack = nodeptr->nextJob;
             }
             job = nodeptr;
             break;
@@ -628,12 +630,23 @@ void jobs_handler(JobStruct* bgStack){
     char* jobInd = "+"; //flag to mark the job that fg would pick
     int jobNum = 1;
     for(JobStruct* trav = bgStack; trav!=NULL;trav = trav->nextJob, ++jobNum, jobInd = "-"){
-        char status[20];
-        if(trav->status == RUNNING){ memcpy(status,"Running",sizeof("Running"));}
-        if(trav->status == STOPPED){ memcpy(status,"Stopped",sizeof("Stopped"));}
-        printf("[%x] %s %s      %s",jobNum,jobInd,status, trav->jobcmd);
-        printf("\n");
+        printJob(trav,jobNum,jobInd);
     }
+}
+
+/**
+ * @brief This function pretty-prints a job given a jobstruct
+ * 
+ * @param job The pointer to this job 
+ * @param jobNum This job's job number
+ * @param jobInd "+" if this job would get selected by fg, "-" otherwise
+ */
+void printJob(JobStruct* job, int jobNum, char* jobInd){
+    char status[20];
+    if(job->status == RUNNING){ memcpy(status,"Running",sizeof("Running"));}
+    if(job->status == STOPPED){ memcpy(status,"Stopped",sizeof("Stopped"));}
+    printf("[%x] %s %s      %s",jobNum,jobInd,status, job->jobcmd);
+    printf("\n");
 }
 
 /**Debug utilities**/
@@ -677,6 +690,5 @@ BUGS:
   This means that when the jobs command is run, all of the terminated jobs have already been freed. 
   This should only happen after they've been printed to console or jobs has been called.
 - Add pretty-printing for terminated bg jobs 
-- Add storage of job cmd in the job struct
-
+- Restarting jobs is causing other stopped jobs to get lost
 */
