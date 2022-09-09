@@ -44,7 +44,7 @@ void waitOnJob(JobStruct* job, JobStruct** bgStack);
 
 /**SHELL COMMAND FUNCTIONS**/
 void fg_handler(JobStruct** bgStack);
-void bg_handler(JobStruct* bgStack);
+void bg_handler(JobStruct** bgStack);
 void jobs_handler(JobStruct* bgStack);
 
 /**Helpful Macros**/
@@ -79,6 +79,7 @@ int main(){
         //read in input
         strbuf = readline("# ");
         if(!strbuf){
+            printf("\n");
             exit(0);
         }
 
@@ -94,9 +95,10 @@ int main(){
             fg_handler(&bgJobs);
             continue;
         } else if (strcmp(tokens[0],"bg") == 0){ //bg command is a shell cmd w no args
+            bg_handler(&bgJobs);
             continue;
         } else if (strcmp(tokens[0],"jobs") == 0){ //jobs command is a shell cmd w no args
-            //TODO: add the remaining logic for jobs
+            //TODO: add the remaining logic for jobs command
             #if DEBUG == 1
             printf("PRE-PRUNE\n");
             debugJobs(bgJobs);
@@ -343,7 +345,7 @@ void startProcess(ProcessStruct* proc, int procInput, int procOutput){
     if(proc->ERROR != NULL){
         //redirect stderr to ERROR
         int errorfile = open(proc->ERROR,O_WRONLY|O_APPEND|O_CREAT);
-        dup2(errorfile,STDOUT_FILENO);
+        dup2(errorfile,STDERR_FILENO);
     }
     //execute the process defined in cmd
     execvp(proc->CMD[0],proc->CMD);
@@ -523,20 +525,20 @@ void fg_handler(JobStruct** bgStack){
     if(*bgStack == NULL){
         #if DEBUG == 1
         printf("no background jobs\n");
-        return;
         #endif
+        return;
     }
     JobStruct* job = NULL;
     JobStruct* prevJob = NULL;
     for(JobStruct* nodeptr = *bgStack; nodeptr != NULL; prevJob = nodeptr, nodeptr = nodeptr->nextJob){
         //iterate over the LL
-        if(nodeptr->status == STOPPED){
-            nodeptr->status = RUNNING;
-            nodeptr->visibility = FOREGROUND;
+        if(nodeptr->status != TERMINATED){ //stopped or already running
+            nodeptr->status = RUNNING; //set to running
+            nodeptr->visibility = FOREGROUND; //pull to foreground
             if(prevJob != NULL){
                 prevJob->nextJob = nodeptr->nextJob; //remove the node from the bg stack
             } else {
-                //nodeptr is pointing to a stopped headptr
+                //nodeptr is pointing to headptr
                 *bgStack = NULL;
             }
             
@@ -545,10 +547,18 @@ void fg_handler(JobStruct** bgStack){
         }
     }
     if(job != NULL){
+        if(job->p1->status!=TERMINATED){
+            job->p1->status = RUNNING;
+        }
         kill(job->p1->pid, SIGCONT);
+        
         if(job->numProcesses == 2){
+            if(job->p2->status!=TERMINATED){
+                job->p2->status = RUNNING;
+            }
             kill(job->p2->pid,SIGCONT);
         }
+
         waitOnJob(job, bgStack);
     }
 }
@@ -558,7 +568,46 @@ void fg_handler(JobStruct** bgStack){
  * 
  * @param bgStack 
  */
-void bg_handler(JobStruct* bgStack){
+void bg_handler(JobStruct** bgStack){
+    if(*bgStack == NULL){
+        #if DEBUG == 1
+        printf("no background jobs\n");
+        #endif
+        return;
+    }
+    JobStruct* job = NULL;
+    JobStruct* prevJob = NULL;
+    for(JobStruct* nodeptr = *bgStack; nodeptr != NULL; prevJob = nodeptr, nodeptr = nodeptr->nextJob){
+        //iterate over the LL and find the first stopped job to start
+        if(nodeptr->status == STOPPED){
+            nodeptr->status = RUNNING;
+            nodeptr->visibility = BACKGROUND;
+            if(prevJob != NULL){
+                prevJob->nextJob = nodeptr->nextJob; //remove the node from the bg stack
+            } else {
+                //nodeptr is pointing to a stopped headptr
+                *bgStack = NULL;
+            }
+            job = nodeptr;
+            break;
+        }
+    }
+    if(job != NULL){
+        if(job->p1->status!=TERMINATED){
+            job->p1->status = RUNNING;
+        }
+        kill(job->p1->pid, SIGCONT);
+        
+        if(job->numProcesses == 2){
+            if(job->p2->status!=TERMINATED){
+                job->p2->status = RUNNING;
+            }
+            kill(job->p2->pid,SIGCONT);
+        }
+
+        waitOnJob(job, bgStack);
+    }
+    
     return;
 }
 
@@ -568,6 +617,9 @@ void bg_handler(JobStruct* bgStack){
  * @param bgStack 
  */
 void jobs_handler(JobStruct* bgStack){
+
+
+
     return;
 }
 
@@ -602,12 +654,13 @@ void debugJobs(JobStruct* bgJobs){
  * NOTES: FG handler function can probably copy a lot of the waiting code from the current main exec function 
  * It needs to find a stopped job and sent SIGCONT to all the processes that were stopped in the job. It then needs to wait on the new fg job in the same way the new job exec stuff does.
  * --> MAKE A WAITONJOB function and replace the repetitive logic
- */
+*/
 
 /*
-TODO: Fix job pruning
-TODO: Get fg working
+TODO: Fix fg - needs to be able to pull running background jobs into foreground.
 TODO: Get bg working
 TODO: Get jobs working
-TODO: Error handling
+TODO: Job Done print 
+TODO: Error handling - pipe improperly closing, file open issues, error output redirection
+TODO: Delete files that get created if invalid cmd w redirection comes in
 */
