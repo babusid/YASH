@@ -266,6 +266,8 @@ JobStruct* createJob(char** tokens, char* jobcmd){
     JobStruct *job = (JobStruct*) malloc(sizeof(JobStruct));
     job->nextJob = NULL;
     job->jobcmd = jobcmd;
+    jobNumMax++; //assign jobnum on creation
+    job->jobnum = jobNumMax;
     //parse the tokens for pipe here to create the job struct
     int secondCmd = -1; //index at which second cmd starts
     int i; //index of where we are in the string
@@ -364,16 +366,28 @@ void startProcess(ProcessStruct* proc, int procInput, int procOutput){
     if(proc->INPUT != NULL){
         //redirect stdin to INPUT 
         int inputfile = open(proc->INPUT,O_RDONLY);
+        if(inputfile == -1){
+            printf("Failed to open input file.\n");
+            exit(-1);
+        }
         dup2(inputfile,STDIN_FILENO);
     }
     if(proc->OUTPUT != NULL){
         //redirect stdout to OUTPUT
         int outputfile = open(proc->OUTPUT,O_WRONLY|O_APPEND|O_CREAT,S_IRUSR|S_IWUSR|S_IRGRP|S_IWGRP|S_IROTH);
+        if(outputfile == -1){
+            printf("Failed to open output file.\n");
+            exit(-1);
+        }
         dup2(outputfile,STDOUT_FILENO);
     }
     if(proc->ERROR != NULL){
         //redirect stderr to ERROR
         int errorfile = open(proc->ERROR,O_WRONLY|O_APPEND|O_CREAT);
+        if(errorfile == -1){
+            printf("Failed to open error file.\n");
+            exit(-1);
+        }
         dup2(errorfile,STDERR_FILENO);
     }
     //execute the process defined in cmd
@@ -421,8 +435,11 @@ void waitOnJob(JobStruct* job, JobStruct** bgStack){
                 *bgStack = stopHandler(job,*bgStack);
             }else{
                 free(job->p1);
+                job->p1 = NULL;
                 free(job->jobcmd);
+                job->jobcmd = NULL;
                 free(job);
+                job = NULL;
             };
         } else {
             tcsetpgrp(STDIN_FILENO, job->pgid); // transfer terminal control to the job because its foreground
@@ -439,9 +456,13 @@ void waitOnJob(JobStruct* job, JobStruct** bgStack){
                 *bgStack = stopHandler(job,*bgStack);
             }else{
                 free(job->p1);
+                job->p1 = NULL;
                 free(job->p2);
+                job->p2 = NULL;
                 free(job->jobcmd);
+                job->jobcmd = NULL;
                 free(job);
+                job = NULL;
             };
         }
     } else {
@@ -458,9 +479,11 @@ void waitOnJob(JobStruct* job, JobStruct** bgStack){
  * @return ** void 
  */
 JobStruct* addJobToBgStack(JobStruct* job, JobStruct* bgStack){
-    //assign jobNum to job here
-    (jobNumMax)++;
-    job->jobnum = jobNumMax;
+    // if(job->jobnum >= 1){
+        //assign jobNum to job here
+        // (jobNumMax)++;
+        // job->jobnum = jobNumMax;
+    // }
     job->nextJob = bgStack;
     return job;
 };
@@ -579,11 +602,15 @@ JobStruct* pruneJobs(JobStruct* bgStack){
             printJob(tmp,tmp->jobnum,"-");
             trav= trav->nextJob;
             free(tmp->p1);
+            tmp->p1 = NULL;
             if(tmp->numProcesses == 2){
                 free(tmp->p2);
+                tmp->p2 = NULL;
             }
             free(tmp->jobcmd);
+            tmp->jobcmd = NULL;
             free(tmp);
+            tmp = NULL;
         }
     }
     jobNumMax = maxJobNum;
@@ -744,7 +771,5 @@ void debugJobs(JobStruct* bgJobs){
 
 
 /*
-TODO: Job numbers need to get cleaned up
-TODO: Error handling - pipe improperly closing, file open issues, error output redirection
-TODO: Delete files that get created if invalid cmd w redirection comes in
+TODO: Add open call fail cases
 */
