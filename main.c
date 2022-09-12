@@ -21,7 +21,6 @@ typedef struct _procstruct{
 //TODO: If time to implement infinite pipe, processes should be a linked list rather than distinct children of the job struct
 typedef struct _jobstruct {
     char* jobcmd; //complete input command
-    int numtokens; //number of tokens in the input command
     struct _jobstruct* nextJob; // pointer to the next job
     ProcessStruct* p1; //first process
     ProcessStruct* p2; //second process
@@ -29,6 +28,7 @@ typedef struct _jobstruct {
     int visibility; //whether or not this job is in the background
     int status; //status of this job
     int pgid; //pgid of the job
+    int jobnum; //the jobnumber of this job
 } JobStruct;
 
 
@@ -39,6 +39,7 @@ JobStruct* createJob(char** tokens, char* inputCmd);
 void startProcess(ProcessStruct* proc, int procInput, int procOutput);
 
 /**JOB CONTROL FUNCTIONS**/
+JobStruct* addJobToBgStack(JobStruct* job, JobStruct* bgStack);
 JobStruct* stopHandler(JobStruct* fgJob, JobStruct* bgJobs);
 void updateJobStatus(JobStruct* jobslist);
 JobStruct* pruneJobs(JobStruct* bgStack);
@@ -60,12 +61,14 @@ void jobs_handler(JobStruct* bgStack);
 #define RUNNING 0 //status macros
 #define STOPPED 1
 #define TERMINATED 2
+#define FAILED 3
 
 /**DEBUG**/
 void debugJobs(JobStruct* bgJobs);
 
 /**PROGRAM STARTS HERE**/
 
+int jobNumMax = 0; //global variable to hold the maximum job number currently
 int main(){
     char* strbuf; //buffer to hold the input string
     char* strbufcpy; //buffer to hold a copy of the input string 
@@ -81,8 +84,8 @@ int main(){
     while(1){
         /**Create a Job to execute**/
         //read in input, create one copy to store in the jobstruct, and one to tokenize
-        strbuf = readline("# ");
-        if(!strbuf){
+        strbuf = readline("\n# ");
+        if(strbuf == NULL){
             printf("\n");
             exit(0);
         }
@@ -94,27 +97,30 @@ int main(){
 
         tokens = parse_input(strbuf," "); //tokenize based on whitespace
         if(tokens[0]==NULL){ //handle nocmd without memleak
+            bgJobs = pruneJobs(bgJobs);
             free(strbuf);
             free(tokens);
             continue;
-        } else if (strcmp(tokens[0],"fg") == 0){ //fg command is a shell cmd w no args. It puts the most recently stopped/backgrounded process back into foreground run status
+        } else if (strcmp(tokens[0],"jobs") == 0){ //jobs command is a shell cmd w no args
+            jobs_handler(bgJobs);
+            bgJobs = pruneJobs(bgJobs);
+            continue;
+        }
+        #if DEBUG == 1
+        printf("PRE-PRUNE\n");
+        debugJobs(bgJobs);
+        #endif
+        bgJobs = pruneJobs(bgJobs);
+        #if DEBUG == 1
+        printf("POST-PRUNE\n");
+        debugJobs(bgJobs);
+        #endif
+        
+        if (strcmp(tokens[0],"fg") == 0){ //fg command is a shell cmd w no args. It puts the most recently stopped/backgrounded process back into foreground run status
             fg_handler(&bgJobs);
             continue;
         } else if (strcmp(tokens[0],"bg") == 0){ //bg command is a shell cmd w no args
             bg_handler(&bgJobs);
-            continue;
-        } else if (strcmp(tokens[0],"jobs") == 0){ //jobs command is a shell cmd w no args
-            //TODO: add the remaining logic for jobs command
-            #if DEBUG == 1
-            printf("PRE-PRUNE\n");
-            debugJobs(bgJobs);
-            #endif
-            bgJobs = pruneJobs(bgJobs);
-            jobs_handler(bgJobs);
-            #if DEBUG == 1
-            printf("POST-PRUNE\n");
-            debugJobs(bgJobs);
-            #endif
             continue;
         }
 
@@ -132,7 +138,11 @@ int main(){
                 //unignore signals
                 signal(SIGTSTP, SIG_DFL);
                 signal(SIGINT,  SIG_DFL);
-                close(pipeArr[0]); //close pipe
+                int err = close(pipeArr[0]); //close pipe
+                if(err == -1){
+                    printf("Failed to close pipe. \n"); 
+                    exit(-1);
+                }
                 setpgid(getpid(),getpid()); //setup and add to prog grp
 
                 //transfer terminal control if job is a foreground job
@@ -152,7 +162,11 @@ int main(){
                 //unignore stop and int signals
                 signal(SIGTSTP, SIG_DFL);
                 signal(SIGINT,  SIG_DFL);
-                close(pipeArr[1]); //close pipe
+                int err = close(pipeArr[1]); //close pipe
+                if(err == -1){
+                    printf("Failed to close pipe. \n"); 
+                    exit(-1);
+                }
                 setpgid(getpid(),job->pgid); //add to prog grp
 
                 //transfer terminal control if job is a foreground job
@@ -166,8 +180,13 @@ int main(){
             job->p2->pid = child2;
 
             //close the pipes
-            close(pipeArr[0]);
-            close(pipeArr[1]);
+            int err0 = close(pipeArr[0]);
+            int err1 = close(pipeArr[1]);
+            if(err1 == -1 || err0 == -1){
+                printf("Failed to close pipe. \n");
+                exit(-1);
+            }
+
             //in case child processes havent been scheduled yet, set their pgids
             setpgid(child1, job->pgid); 
             setpgid(child2, job->pgid);
@@ -331,6 +350,9 @@ ProcessStruct* createProcess(char** tokens){
  * @param procOutput Int describing pipe output, if applicable. If no pipe, this value will be null.
  */
 void startProcess(ProcessStruct* proc, int procInput, int procOutput){
+    int stdoutcpy =  dup(STDOUT_FILENO);
+    int stdincpy  =  dup(STDIN_FILENO);
+    int stderrcpy =  dup(STDERR_FILENO);
     if(procInput != NOPIPE){
         //redirect pipe output to stdin
         dup2(procInput,STDIN_FILENO);
@@ -355,7 +377,28 @@ void startProcess(ProcessStruct* proc, int procInput, int procOutput){
         dup2(errorfile,STDERR_FILENO);
     }
     //execute the process defined in cmd
-    execvp(proc->CMD[0],proc->CMD);
+    int retstat = execvp(proc->CMD[0],proc->CMD);
+    
+    //if execvp failed, reset all stds
+    dup2(stdincpy,STDIN_FILENO);
+    dup2(stdoutcpy,STDOUT_FILENO);
+    dup2(stderrcpy,STDERR_FILENO);
+    printf("Command '%s' not found.\n",proc->CMD[0]);
+    if(procOutput != NOPIPE){
+        int closeStat = close(procOutput);
+        if(closeStat == -1){
+            printf("failed to close pipe\n");
+            exit(-1);
+        }
+    }
+    if(procInput != NOPIPE){
+        int closeStat = close(procInput);
+        if(closeStat == -1){
+            printf("failed to close pipe\n");
+            exit(-1);
+        }
+    }
+    exit(-1);
 }
 
 /**
@@ -402,13 +445,25 @@ void waitOnJob(JobStruct* job, JobStruct** bgStack){
             };
         }
     } else {
-        //background add to bgstack
-        job->nextJob = *bgStack; //add job to the bg stack
-        *bgStack = job;
+        //assign jobnum to job here
+        *bgStack = addJobToBgStack(job,*bgStack);
     }
 }
 
 /**JOB CONTROL FUNCTIONS**/
+/**
+ * @brief Given a job and a background job stack pointer, this function will assign a jobnum to the job, and add it to the bgstack
+ * 
+ * @param job 
+ * @return ** void 
+ */
+JobStruct* addJobToBgStack(JobStruct* job, JobStruct* bgStack){
+    //assign jobNum to job here
+    (jobNumMax)++;
+    job->jobnum = jobNumMax;
+    job->nextJob = bgStack;
+    return job;
+};
 
 /**
  * @brief Updates a list of job statuses, extracting process statuses, and populating the job struct for every job in the linked list
@@ -425,7 +480,7 @@ void updateJobStatus(JobStruct* jobslist){
             if(execstatus1 == -2){ //nothing has changed for this PID
                 continue;
             }
-            if(WIFEXITED(execstatus1) | WIFSIGNALED(execstatus1)){ //the job was terminated either by exit call or by signal TODO: NEVER GETTING TO THIS POINT
+            if(WIFEXITED(execstatus1) | WIFSIGNALED(execstatus1)){ //the job was terminated either by exit call or by signal 
                 jobslist->p1->status = TERMINATED;
             } else if (WIFSTOPPED(execstatus1)){ //the job was stopped by a signal
                 jobslist->p1->status = STOPPED;
@@ -466,9 +521,6 @@ void updateJobStatus(JobStruct* jobslist){
                 jobslist->status = TERMINATED;
             }
         }
-        if(jobslist->status == TERMINATED){
-            printJob(jobslist,0,"-");
-        }
     }
     return;
 }
@@ -486,8 +538,7 @@ JobStruct* stopHandler(JobStruct* fgJob, JobStruct* bgJob){
     if(fgJob->numProcesses==2){
         fgJob->p2->status = STOPPED;
     }
-    fgJob->nextJob = bgJob;
-    return fgJob;
+    return addJobToBgStack(fgJob, bgJob);
 }
 
 /**
@@ -497,37 +548,65 @@ JobStruct* stopHandler(JobStruct* fgJob, JobStruct* bgJob){
  * @return JobStruct* 
  */
 JobStruct* pruneJobs(JobStruct* bgStack){
-    JobStruct* headptr = bgStack;
-    if(headptr == NULL){
-        return headptr;
-    }
-    if(headptr->status == TERMINATED){
-        JobStruct* ret = headptr->nextJob;
-        free(headptr->p1);
-        if(headptr->numProcesses==2){
-            free(headptr->p2);
-        }
-        free(headptr);
-        return ret;
-    }
-    //iterate over stack with fast/slow ptrs, headptr is slow, trav is fast
-    JobStruct* slow = headptr;
-    for(JobStruct* trav = headptr->nextJob; trav != NULL; slow = trav, trav = trav->nextJob){
-        if(trav->status == TERMINATED){
-            slow->nextJob = trav->nextJob;
-            free(trav->p1);
-            free(trav->jobcmd);
-            if(trav->numProcesses == 2){
-                free(trav->p2);
+    int maxJobNum = 0; //the maxJobNum still active after terminated jobs are pruned
+    JobStruct* newStack = NULL;
+    JobStruct* newTrav = NULL;
+    //iterate over the old list, copy non-terminated jobs into the new list
+    for(JobStruct* trav = bgStack; trav!=NULL;){
+        if(trav->status!=TERMINATED){
+            //copy to new list
+            if(newStack == NULL){
+                newStack = (JobStruct*) malloc(sizeof(JobStruct)); //allocate node
+                memcpy(newStack,trav,sizeof(JobStruct)); //copy the old node data
+                newStack->nextJob = NULL;
+                newTrav = newStack; //setup traverser for new list
+            } else {
+                newTrav->nextJob = (JobStruct*) malloc(sizeof(JobStruct)); //allocate node
+                newTrav = newTrav->nextJob; //iterate
+                memcpy(newTrav,trav,sizeof(JobStruct)); //copy the old node data   
+                newTrav->nextJob = NULL;
             }
-            free(trav);
+
+            if(newTrav->jobnum > maxJobNum){
+                maxJobNum = newTrav->jobnum;
+            }
+
+            trav= trav->nextJob;
+        } else {
+            //print that this job has finished
+            //free/delete these jobs
+            JobStruct* tmp = trav;
+            printJob(tmp,tmp->jobnum,"-");
+            trav= trav->nextJob;
+            free(tmp->p1);
+            if(tmp->numProcesses == 2){
+                free(tmp->p2);
+            }
+            free(tmp->jobcmd);
+            free(tmp);
         }
     }
-    return headptr;
-
+    jobNumMax = maxJobNum;
+    return newStack;
 }
 
 /**SHELL COMMAND FUNCTIONS**/
+
+/**
+ * @brief This function pretty-prints a job given a jobstruct
+ * 
+ * @param job The pointer to this job 
+ * @param jobNum This job's job number
+ * @param jobInd "+" if this job would get selected by fg, "-" otherwise
+ */
+void printJob(JobStruct* job, int jobNum, char* jobInd){
+    char status[20];
+    if(job->status == RUNNING)      { memcpy(status,"Running",sizeof("Running"));}
+    if(job->status == STOPPED)      { memcpy(status,"Stopped",sizeof("Stopped"));}
+    if(job->status == TERMINATED)   { memcpy(status,   "Done",   sizeof("Done"));}
+    printf("[%x] %s %s      %s",jobNum,jobInd,status, job->jobcmd);
+    printf("\n");
+}
 
 /**
  * @brief Handler for the 'fg' command. It iterates over the bgstack, brings the most recently stopped process to the foreground, and begins running it
@@ -536,9 +615,7 @@ JobStruct* pruneJobs(JobStruct* bgStack){
  */
 void fg_handler(JobStruct** bgStack){
     if(*bgStack == NULL){
-        #if DEBUG == 1
         printf("no background jobs\n");
-        #endif
         return;
     }
     JobStruct* job = NULL;
@@ -583,9 +660,7 @@ void fg_handler(JobStruct** bgStack){
  */
 void bg_handler(JobStruct** bgStack){
     if(*bgStack == NULL){
-        #if DEBUG == 1
         printf("no background jobs\n");
-        #endif
         return;
     }
     JobStruct* job = NULL;
@@ -631,26 +706,14 @@ void bg_handler(JobStruct** bgStack){
  */
 void jobs_handler(JobStruct* bgStack){
     char* jobInd = "+"; //flag to mark the job that fg would pick
-    int jobNum = 1;
-    for(JobStruct* trav = bgStack; trav!=NULL;trav = trav->nextJob, ++jobNum, jobInd = "-"){
-        printJob(trav,jobNum,jobInd);
+    if(bgStack==NULL){
+        return;
     }
-}
-
-/**
- * @brief This function pretty-prints a job given a jobstruct
- * 
- * @param job The pointer to this job 
- * @param jobNum This job's job number
- * @param jobInd "+" if this job would get selected by fg, "-" otherwise
- */
-void printJob(JobStruct* job, int jobNum, char* jobInd){
-    char status[20];
-    if(job->status == RUNNING)      { memcpy(status,"Running",sizeof("Running"));}
-    if(job->status == STOPPED)      { memcpy(status,"Stopped",sizeof("Stopped"));}
-    if(job->status == TERMINATED)   { memcpy(status,   "Done",   sizeof("Done"));}
-    printf("[%x] %s %s      %s",jobNum,jobInd,status, job->jobcmd);
-    printf("\n");
+    for(JobStruct* trav = bgStack; trav!=NULL;trav = trav->nextJob, jobInd = "-"){
+        if(trav->status != TERMINATED){
+            printJob(trav,trav->jobnum,jobInd);
+        }
+    }
 }
 
 /**Debug utilities**/
@@ -680,11 +743,8 @@ void debugJobs(JobStruct* bgJobs){
 };
 
 
-
 /*
-TODO: Get jobs working - sort of? Need to refine and finish this off
-TODO: Jobnumber feature addition
-TODO: Job Done print asynchronously -> put it in updateJobs
+TODO: Job numbers need to get cleaned up
 TODO: Error handling - pipe improperly closing, file open issues, error output redirection
 TODO: Delete files that get created if invalid cmd w redirection comes in
 */
