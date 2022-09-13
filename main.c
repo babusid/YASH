@@ -84,7 +84,7 @@ int main(){
     while(1){
         /**Create a Job to execute**/
         //read in input, create one copy to store in the jobstruct, and one to tokenize
-        strbuf = readline("\n# ");
+        strbuf = readline("# ");
         if(strbuf == NULL){
             printf("\n");
             exit(0);
@@ -367,7 +367,6 @@ void startProcess(ProcessStruct* proc, int procInput, int procOutput){
         //redirect stdin to INPUT 
         int inputfile = open(proc->INPUT,O_RDONLY);
         if(inputfile == -1){
-            printf("Failed to open input file.\n");
             exit(-1);
         }
         dup2(inputfile,STDIN_FILENO);
@@ -376,7 +375,6 @@ void startProcess(ProcessStruct* proc, int procInput, int procOutput){
         //redirect stdout to OUTPUT
         int outputfile = open(proc->OUTPUT,O_WRONLY|O_APPEND|O_CREAT,S_IRUSR|S_IWUSR|S_IRGRP|S_IWGRP|S_IROTH);
         if(outputfile == -1){
-            printf("Failed to open output file.\n");
             exit(-1);
         }
         dup2(outputfile,STDOUT_FILENO);
@@ -385,7 +383,6 @@ void startProcess(ProcessStruct* proc, int procInput, int procOutput){
         //redirect stderr to ERROR
         int errorfile = open(proc->ERROR,O_WRONLY|O_APPEND|O_CREAT);
         if(errorfile == -1){
-            printf("Failed to open error file.\n");
             exit(-1);
         }
         dup2(errorfile,STDERR_FILENO);
@@ -397,18 +394,16 @@ void startProcess(ProcessStruct* proc, int procInput, int procOutput){
     dup2(stdincpy,STDIN_FILENO);
     dup2(stdoutcpy,STDOUT_FILENO);
     dup2(stderrcpy,STDERR_FILENO);
-    printf("Command '%s' not found.\n",proc->CMD[0]);
+    
     if(procOutput != NOPIPE){
         int closeStat = close(procOutput);
         if(closeStat == -1){
-            printf("failed to close pipe\n");
             exit(-1);
         }
     }
     if(procInput != NOPIPE){
         int closeStat = close(procInput);
         if(closeStat == -1){
-            printf("failed to close pipe\n");
             exit(-1);
         }
     }
@@ -564,68 +559,19 @@ JobStruct* stopHandler(JobStruct* fgJob, JobStruct* bgJob){
     return addJobToBgStack(fgJob, bgJob);
 }
 
-void pruneJobs_helper(JobStruct* bgStack, char* indicator);
+
 /**
- * @brief Given a list of jobs, prune the ones that are TERMINATED and return a new list without them
- * 
- * @param bgStack 
- * @return JobStruct* 
+ * @brief A helper function for the pruneJobs function that reverses the stack of background jobs and prints it properly
+ * @param bgStack pointer to the background jobs stack
+ * @param indicator Indicator for the top-most job, should be a "+"
  */
-JobStruct* pruneJobs(JobStruct* bgStack){
-    int maxJobNum = 0; //the maxJobNum still active after terminated jobs are pruned
-    JobStruct* newStack = NULL;
-    JobStruct* newTrav = NULL;
-    //iterate over the old list, copy non-terminated jobs into the new list
-    for(JobStruct* trav = bgStack; trav!=NULL;){
-        if(trav->status!=TERMINATED){
-            //copy to new list
-            if(newStack == NULL){
-                newStack = (JobStruct*) malloc(sizeof(JobStruct)); //allocate node
-                memcpy(newStack,trav,sizeof(JobStruct)); //copy the old node data
-                newStack->nextJob = NULL;
-                newTrav = newStack; //setup traverser for new list
-            } else {
-                newTrav->nextJob = (JobStruct*) malloc(sizeof(JobStruct)); //allocate node
-                newTrav = newTrav->nextJob; //iterate
-                memcpy(newTrav,trav,sizeof(JobStruct)); //copy the old node data   
-                newTrav->nextJob = NULL;
-            }
-
-            if(newTrav->jobnum > maxJobNum){
-                maxJobNum = newTrav->jobnum;
-            }
-
-            trav= trav->nextJob;
-        } 
-        else {
-            //print that this job has finished
-            //free/delete these jobs
-            JobStruct* tmp = trav;
-            printJob(tmp,tmp->jobnum,"-");
-            trav= trav->nextJob;
-            free(tmp->p1);
-            tmp->p1 = NULL;
-            if(tmp->numProcesses == 2){
-                free(tmp->p2);
-                tmp->p2 = NULL;
-            }
-            free(tmp->jobcmd);
-            tmp->jobcmd = NULL;
-            free(tmp);
-            tmp = NULL;
-        }
-    }
-    // pruneJobs_helper(bgStack,"+");
-    jobNumMax = maxJobNum;
-    return newStack;
-}
-
 void pruneJobs_helper(JobStruct* bgStack,char* indicator){
     JobStruct* j = bgStack;
     if(j == NULL){
         return;
+    }
     if(j->nextJob!=NULL){
-        jobs_handler(&(j->nextJob),"-");
+        pruneJobs_helper(j->nextJob,"-");
         if(j->status==TERMINATED){
             printJob(j,j->jobnum,indicator);
             free(j->p1);
@@ -648,9 +594,43 @@ void pruneJobs_helper(JobStruct* bgStack,char* indicator){
         free(j);
         return;
     }
-    }
 }
 
+/**
+ * @brief Given a list of jobs, prune the ones that are TERMINATED and return a new list without them
+ * 
+ * @param bgStack 
+ * @return JobStruct* 
+ */
+JobStruct* pruneJobs(JobStruct* bgStack){
+    int maxJobNum = 0; //the maxJobNum still active after terminated jobs are pruned
+    JobStruct* newStack = NULL;
+    JobStruct* newTrav = NULL;
+    //iterate over the old list, copy non-terminated jobs into the new list
+    for(JobStruct* trav = bgStack; trav!=NULL;trav= trav->nextJob){
+        if(trav->status!=TERMINATED){
+            //copy to new list
+            if(newStack == NULL){
+                newStack = (JobStruct*) malloc(sizeof(JobStruct)); //allocate node
+                memcpy(newStack,trav,sizeof(JobStruct)); //copy the old node data
+                newStack->nextJob = NULL;
+                newTrav = newStack; //setup traverser for new list
+            } else {
+                newTrav->nextJob = (JobStruct*) malloc(sizeof(JobStruct)); //allocate node
+                newTrav = newTrav->nextJob; //iterate
+                memcpy(newTrav,trav,sizeof(JobStruct)); //copy the old node data   
+                newTrav->nextJob = NULL;
+            }
+
+            if(newTrav->jobnum > maxJobNum){
+                maxJobNum = newTrav->jobnum;
+            }
+        } 
+    }
+    pruneJobs_helper(bgStack,"+");
+    jobNumMax = maxJobNum;
+    return newStack;
+}
 
 /**SHELL COMMAND FUNCTIONS**/
 
