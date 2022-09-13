@@ -49,7 +49,7 @@ void printJob(JobStruct* job, int jobNum, char* jobInd);
 /**SHELL COMMAND FUNCTIONS**/
 void fg_handler(JobStruct** bgStack);
 void bg_handler(JobStruct** bgStack);
-void jobs_handler(JobStruct* bgStack);
+void jobs_handler(JobStruct** bgStack, char* indicator);
 
 /**Helpful Macros**/
 //Process creation macros
@@ -102,7 +102,7 @@ int main(){
             free(tokens);
             continue;
         } else if (strcmp(tokens[0],"jobs") == 0){ //jobs command is a shell cmd w no args
-            jobs_handler(bgJobs);
+            jobs_handler(&bgJobs,"+");
             bgJobs = pruneJobs(bgJobs);
             continue;
         }
@@ -564,6 +564,7 @@ JobStruct* stopHandler(JobStruct* fgJob, JobStruct* bgJob){
     return addJobToBgStack(fgJob, bgJob);
 }
 
+void pruneJobs_helper(JobStruct* bgStack, char* indicator);
 /**
  * @brief Given a list of jobs, prune the ones that are TERMINATED and return a new list without them
  * 
@@ -595,7 +596,8 @@ JobStruct* pruneJobs(JobStruct* bgStack){
             }
 
             trav= trav->nextJob;
-        } else {
+        } 
+        else {
             //print that this job has finished
             //free/delete these jobs
             JobStruct* tmp = trav;
@@ -613,9 +615,42 @@ JobStruct* pruneJobs(JobStruct* bgStack){
             tmp = NULL;
         }
     }
+    // pruneJobs_helper(bgStack,"+");
     jobNumMax = maxJobNum;
     return newStack;
 }
+
+void pruneJobs_helper(JobStruct* bgStack,char* indicator){
+    JobStruct* j = bgStack;
+    if(j == NULL){
+        return;
+    if(j->nextJob!=NULL){
+        jobs_handler(&(j->nextJob),"-");
+        if(j->status==TERMINATED){
+            printJob(j,j->jobnum,indicator);
+            free(j->p1);
+            if(j->numProcesses == 2){
+                free(j->p2);
+            }
+            free(j->jobcmd);
+        }
+        free(j);
+        return;
+    } else {
+        if(j->status==TERMINATED){
+            printJob(j,j->jobnum,indicator);
+            free(j->p1);
+            if(j->numProcesses == 2){
+                free(j->p2);
+            }
+            free(j->jobcmd);
+        }
+        free(j);
+        return;
+    }
+    }
+}
+
 
 /**SHELL COMMAND FUNCTIONS**/
 
@@ -635,10 +670,11 @@ void printJob(JobStruct* job, int jobNum, char* jobInd){
     printf("\n");
 }
 
+
 /**
  * @brief Handler for the 'fg' command. It iterates over the bgstack, brings the most recently stopped process to the foreground, and begins running it
  * 
- * @param bgStack 
+ * @param bgStack Pointer to the background stack
  */
 void fg_handler(JobStruct** bgStack){
     if(*bgStack == NULL){
@@ -683,7 +719,7 @@ void fg_handler(JobStruct** bgStack){
 /**
  * @brief Handler for the 'bg' command. It iterates over the bgstack, and begins running the most recently stopped process in the backgroun
  * 
- * @param bgStack 
+ * @param bgStack Pointer to the background stack
  */
 void bg_handler(JobStruct** bgStack){
     if(*bgStack == NULL){
@@ -729,17 +765,25 @@ void bg_handler(JobStruct** bgStack){
 /**
  * @brief Handler for the 'jobs command. It iterates over the bgstack, and prints out all of the jobs and their current statuses in the required format.
  * 
- * @param bgStack 
+ * @param bgStack Pointer to the first node of the background stack
+ * @param indicator Indicator token for the topmost job
  */
-void jobs_handler(JobStruct* bgStack){
-    char* jobInd = "+"; //flag to mark the job that fg would pick
-    if(bgStack==NULL){
+void jobs_handler(JobStruct** bgStack,char* indicator){
+    JobStruct* j = *bgStack;
+    if(j == NULL){
         return;
     }
-    for(JobStruct* trav = bgStack; trav!=NULL;trav = trav->nextJob, jobInd = "-"){
-        if(trav->status != TERMINATED){
-            printJob(trav,trav->jobnum,jobInd);
+    if(j->nextJob!=NULL){
+        jobs_handler(&(j->nextJob),"-");
+        if(j->status!=TERMINATED){
+            printJob(j,j->jobnum,indicator);
         }
+        return;
+    } else {
+        if(j->status!=TERMINATED){
+            printJob(j,j->jobnum,indicator);
+        }
+        return;
     }
 }
 
@@ -767,9 +811,10 @@ void debugJobs(JobStruct* bgJobs){
     printf("Count of running bg jobs:       %i\n",cntRun);
     printf("Count of terminated bg jobs:    %i\n",cntTerm);
     printf("Count of stopped bg jobs:       %i\n",cntStp);
-};
 
+}
 
-/*
-TODO: Add open call fail cases
-*/
+/**
+ * TODO: fix the jobs printing on pruneJobs
+ * 
+ */
